@@ -2,6 +2,7 @@ var Clay = require('@rebble/clay');
 var clayConfig = require('./config.json');
 var customClay = require('./custom-clay');
 var presetApi = customClay();
+var palette = require('./palette');
 
 // Filter manually because this Clay version predates Emery's capability names.
 var watchInfo = null;
@@ -20,6 +21,29 @@ if (!watchInfo || watchInfo.platform !== 'emery') {
 }
 
 var clay = new Clay(clayConfig, customClay, {autoHandleEvents: false});
+
+// Each time the page opens, rebuild Clay with color pickers that only offer colors
+// readable on the saved background (Dark/Light); saved colors outside that set are
+// kept as extra swatches so they are not reset.
+var COLOR_KEYS = ['color_time', 'color_date', 'color_today', 'color_accent'];
+
+function buildClay(settings) {
+  var dark = String(settings.style_inv) === '0';
+  var saved = COLOR_KEYS.map(function (key) { return settings[key]; });
+  var config = JSON.parse(JSON.stringify(clayConfig));
+  config.forEach(function (section) {
+    (section.items || []).forEach(function (item) {
+      if (item.type === 'color' && COLOR_KEYS.indexOf(item.messageKey) !== -1) {
+        item.layout = palette.buildPalette(dark, saved);
+      }
+    });
+  });
+  var rebuilt = new Clay(config, customClay, {autoHandleEvents: false});
+  // Clay only fills in watch info (meta) on 'ready' for the instance created at
+  // startup; carry it over or capability checks crash the page.
+  rebuilt.meta = clay.meta;
+  return rebuilt;
+}
 
 var translations = {
     EN: { trans_connected: 'Linked', trans_disconnected: 'No Link', trans_abbr_sunday: 'Su', trans_abbr_monday: 'Mo', trans_abbr_tuesday: 'Tu', trans_abbr_wedsday: 'We', trans_abbr_thursday: 'Th', trans_abbr_friday: 'Fr', trans_abbr_saturday: 'Sa', trans_january: 'January', trans_february: 'February', trans_march: 'March', trans_april: 'April', trans_may: 'May', trans_june: 'June', trans_july: 'July', trans_august: 'August', trans_september: 'September', trans_october: 'October', trans_november: 'November', trans_december: 'December', trans_sunday: 'Sunday', trans_monday: 'Monday', trans_tuesday: 'Tuesday', trans_wedsday: 'Wednesday', trans_thursday: 'Thursday', trans_friday: 'Friday', trans_saturday: 'Saturday' },
@@ -1312,10 +1336,14 @@ Pebble.addEventListener(
 
   function () {
     // Normalize obsolete saved values before Clay renders its select controls.
-    saveJSON(
-      'clay-settings',
-      readSettings()
-    );
+    var current = readSettings();
+    saveJSON('clay-settings', current);
+
+    try {
+      clay = buildClay(current);
+    } catch (error) {
+      console.warn('Palette error: ' + error);
+    }
 
     Pebble.openURL(
       clay.generateUrl()
