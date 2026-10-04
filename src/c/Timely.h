@@ -81,6 +81,24 @@ typedef struct persist_adv_settings { // 243 bytes
   uint8_t slots[10];
 } __attribute__((__packed__)) persist_adv_settings;
 
+typedef struct persist_theme { // 6 bytes, kept apart from the structs above
+  uint8_t theme_id;               // last chosen preset; only used to migrate old settings
+  uint8_t status_colors;          // battery / Bluetooth status colors
+  uint8_t custom_accents;         // legacy toggle, migrated to theme_id 6 on load
+  uint8_t time_color;             // legacy custom colors (GColor argb), migrated on load
+  uint8_t date_color;
+  uint8_t today_color;
+} __attribute__((__packed__)) persist_theme;
+
+// The color settings that drive rendering. Black and white both mean "text color".
+typedef struct persist_colors { // 5 bytes
+  uint8_t time_color;             // GColor argb
+  uint8_t date_color;
+  uint8_t today_color;
+  uint8_t accent_color;           // calendar muted days and grid
+  uint8_t colored_icons;          // semantic complication / weather / Bluetooth colors
+} __attribute__((__packed__)) persist_colors;
+
 typedef struct weather_data {
   int16_t current;
   char condition[2];

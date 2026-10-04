@@ -1,5 +1,7 @@
 var Clay = require('@rebble/clay');
 var clayConfig = require('./config.json');
+var customClay = require('./custom-clay');
+var presetApi = customClay();
 
 // Filter manually because this Clay version predates Emery's capability names.
 var watchInfo = null;
@@ -17,7 +19,7 @@ if (!watchInfo || watchInfo.platform !== 'emery') {
   });
 }
 
-var clay = new Clay(clayConfig, null, {autoHandleEvents: false});
+var clay = new Clay(clayConfig, customClay, {autoHandleEvents: false});
 
 var translations = {
     EN: { trans_connected: 'Linked', trans_disconnected: 'No Link', trans_abbr_sunday: 'Su', trans_abbr_monday: 'Mo', trans_abbr_tuesday: 'Tu', trans_abbr_wedsday: 'We', trans_abbr_thursday: 'Th', trans_abbr_friday: 'Fr', trans_abbr_saturday: 'Sa', trans_january: 'January', trans_february: 'February', trans_march: 'March', trans_april: 'April', trans_may: 'May', trans_june: 'June', trans_july: 'July', trans_august: 'August', trans_september: 'September', trans_october: 'October', trans_november: 'November', trans_december: 'December', trans_sunday: 'Sunday', trans_monday: 'Monday', trans_tuesday: 'Tuesday', trans_wedsday: 'Wednesday', trans_thursday: 'Thursday', trans_friday: 'Friday', trans_saturday: 'Saturday' },
@@ -204,10 +206,49 @@ function finiteNumber(value) {
   return typeof value === 'number' && isFinite(value);
 }
 
+function unwrapSetting(raw, key) {
+  var v = has(raw, key) ? raw[key] : undefined;
+  return v && typeof v === 'object' && has(v, 'value') ? v.value : v;
+}
+
+// Before the color pickers became the real settings, a preset id (0-6) picked the
+// colors on the watch. Saved settings without color_accent are converted using the
+// preset and Dark/Light mode they had; Custom keeps its old three custom colors.
+function migrateColorSettings(raw) {
+  if (has(raw, 'color_accent')) { return raw; }
+
+  var id = String(unwrapSetting(raw, 'theme_id'));
+  var custom = unwrapSetting(raw, 'custom_accents');
+  if (custom === true || custom === 1 || custom === '1') { id = '6'; }
+  var dark = String(unwrapSetting(raw, 'style_inv')) === '0';
+  var status = unwrapSetting(raw, 'status_colors');
+  status = status === true || status === 1 || status === '1';
+
+  var values = presetApi.presetValues(id === '6' ? '1' : id, dark);
+  if (!values) { return raw; }
+  if (id === '6') {
+    ['color_time', 'color_date', 'color_today'].forEach(function (key) {
+      var v = unwrapSetting(raw, key);
+      if (typeof v === 'string') { v = parseInt(v.replace(/^(#|0x)/i, ''), 16); }
+      if (finiteNumber(v)) { values[key] = v; }
+    });
+  }
+  // Classic never used status colors; the others kept the old toggle.
+  values.status_colors = id === '0' ? false : status;
+
+  var migrated = {};
+  Object.keys(raw).forEach(function (k) { migrated[k] = raw[k]; });
+  Object.keys(values).forEach(function (k) { migrated[k] = values[k]; });
+  if (id === '6') { migrated.theme_id = '1'; }
+  return migrated;
+}
+
 function normalizeSettings(raw) {
   var settings = {};
 
   raw = raw && typeof raw === 'object' ? raw : {};
+
+  raw = migrateColorSettings(raw);
 
   Object.keys(settingsByKey).forEach(function (key) {
     var item = settingsByKey[key];
@@ -234,6 +275,15 @@ function normalizeSettings(raw) {
         value === true ||
         value === 1 ||
         value === '1';
+    } else if (item.type === 'color') {
+      // Colors are RGB integers; the config defaults are hex strings.
+      if (typeof value === 'string') {
+        value = parseInt(value.replace(/^(#|0x)/i, ''), 16);
+      }
+
+      if (!finiteNumber(value)) {
+        value = parseInt(item.defaultValue, 16);
+      }
     } else if (item.options) {
       var valid = item.options.some(function (option) {
         return String(option.value) === String(value);

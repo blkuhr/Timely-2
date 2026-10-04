@@ -28,7 +28,7 @@
       {
         "type": "select",
         "messageKey": "style_inv",
-        "label": "Theme",
+        "label": "Dark / Light Mode",
         "defaultValue": "1",
         "options": [
           { "label": "Dark", "value": "0" },
@@ -82,6 +82,54 @@
           { "label": "Min 2", "value": "6" },
           { "label": "Ow", "value": "7" }
         ]
+      }
+    ]
+  },
+  {
+    "type": "section",
+    "capabilities": ["COLOR"],
+    "items": [
+      {
+        "type": "heading",
+        "defaultValue": "Colors"
+      },
+      {
+        "type": "select",
+        "messageKey": "theme_id",
+        "label": "Preset",
+        "defaultValue": "0",
+        "options": [
+          { "label": "Classic", "value": "0" },
+          { "label": "Minimal", "value": "1" },
+          { "label": "Ocean", "value": "2" },
+          { "label": "Forest", "value": "3" },
+          { "label": "Amber", "value": "4" },
+          { "label": "Neon", "value": "5" }
+        ]
+      },
+      {
+        "type": "color",
+        "messageKey": "color_time",
+        "label": "Time",
+        "defaultValue": "000000"
+      },
+      {
+        "type": "color",
+        "messageKey": "color_date",
+        "label": "Date",
+        "defaultValue": "000000"
+      },
+      {
+        "type": "color",
+        "messageKey": "color_today",
+        "label": "Today",
+        "defaultValue": "000000"
+      },
+      {
+        "type": "color",
+        "messageKey": "color_accent",
+        "label": "Past days accent",
+        "defaultValue": "000000"
       }
     ]
   },
