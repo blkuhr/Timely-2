@@ -114,7 +114,19 @@
           { "label": "Weather Only", "value": "1" },
           { "label": "Heart Rate Only", "value": "2" },
           { "label": "Sleep Only", "value": "3" },
-          { "label": "Rotate Hourly", "value": "4" }
+          { "label": "Rotate Hourly", "value": "4" },
+          { "label": "Auto (sleep / activity / fallback)", "value": "5" }
+        ]
+      },
+      {
+        "type": "select",
+        "messageKey": "auto_fallback",
+        "label": "Auto Fallback",
+        "description": "Auto shows sleep for an hour after waking and heart rate while walking, running or working out. Otherwise it shows this.",
+        "defaultValue": "1",
+        "options": [
+          { "label": "Weather", "value": "1" },
+          { "label": "Steps", "value": "0" }
         ]
       },
       {

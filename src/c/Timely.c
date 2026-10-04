@@ -57,6 +57,7 @@ static int s_batt_width = 44;
 #define PK_WEATHER_COND 11
 #define PK_TAP_TO_CYCLE 12
 #define PK_WEATHER_TIMESTAMP 13
+#define PK_AUTO_FALLBACK 15
 
 #define MSG_VAL_TIMEZONE_OFFSET 103
 #define MSG_VAL_SEND_WATCH_VERSION 104
@@ -68,9 +69,11 @@ enum ComplicationMode {
   MODE_WEATHER = 1,
   MODE_HEART = 2,
   MODE_SLEEP = 3,
-  MODE_ROTATE = 4
+  MODE_ROTATE = 4,
+  MODE_AUTO = 5
 };
 static uint8_t complication_mode = MODE_WEATHER;
+static uint8_t auto_fallback = MODE_WEATHER;   // MODE_WEATHER or MODE_STEPS, used by MODE_AUTO
 static uint8_t active_display_metric = MODE_WEATHER;
 static int cached_steps = 0;
 static int cached_bpm = 0;
@@ -269,6 +272,79 @@ static bool update_health_cache(void) {
 }
 
 #if defined(PBL_PLATFORM_EMERY)
+// Auto mode: look back this far for a finished sleep session, and keep showing
+// the sleep summary for this long after waking.
+#define AUTO_SLEEP_LOOKBACK_SEC (16 * 60 * 60)
+#define AUTO_SLEEP_SHOW_SEC (60 * 60)
+
+static bool last_sleep_end_cb(HealthActivity activity, time_t time_start, time_t time_end, void *context) {
+  *(time_t *)context = time_end;
+  return false;   // iterating backwards, so the first session is the most recent
+}
+
+// Pick what MODE_AUTO shows right now: sleep summary while asleep and for an
+// hour after waking, heart rate while walking/running/in a workout, otherwise
+// the configured fallback. Falls back too when health data is unavailable.
+static uint8_t auto_pick_metric(void) {
+  time_t now = time(NULL);
+  HealthServiceAccessibilityMask access =
+    health_service_metric_accessible(HealthMetricStepCount, time_start_of_today(), now);
+  if (!(access & HealthServiceAccessibilityMaskAvailable)) {
+    return auto_fallback;
+  }
+
+  HealthActivityMask activities = health_service_peek_current_activities();
+  if (activities & (HealthActivitySleep | HealthActivityRestfulSleep)) {
+    return MODE_SLEEP;
+  }
+
+  time_t last_sleep_end = 0;
+  health_service_activities_iterate(HealthActivitySleep, now - AUTO_SLEEP_LOOKBACK_SEC, now,
+                                    HealthIterationDirectionPast, last_sleep_end_cb, &last_sleep_end);
+  if (last_sleep_end > 0 && (now - last_sleep_end) < AUTO_SLEEP_SHOW_SEC) {
+    return MODE_SLEEP;
+  }
+
+  if (activities & (HealthActivityWalk | HealthActivityRun | HealthActivityOpenWorkout)) {
+    return MODE_HEART;
+  }
+  return auto_fallback;
+}
+
+// Re-evaluate MODE_AUTO. Returns true when the visible metric changed.
+static bool refresh_auto_metric(void) {
+  if (complication_mode != MODE_AUTO) {
+    return false;
+  }
+  uint8_t metric = auto_pick_metric();
+  bool changed = (metric != active_display_metric);
+  active_display_metric = metric;
+  return changed;
+}
+
+// Health events only matter to MODE_AUTO, so subscribe only while it is selected.
+static void health_event_handler(HealthEventType event, void *context) {
+  if (event != HealthEventSignificantUpdate && event != HealthEventMovementUpdate &&
+      event != HealthEventSleepUpdate) {
+    return;
+  }
+  bool changed = refresh_auto_metric();
+  if (active_display_metric != MODE_WEATHER && update_health_cache()) {
+    changed = true;
+  }
+  if (changed) {
+    layer_mark_dirty(weather_layer);
+  }
+}
+
+static void sync_health_events(void) {
+  if (complication_mode == MODE_AUTO) {
+    health_service_events_subscribe(health_event_handler, NULL);
+  } else {
+    health_service_events_unsubscribe();
+  }
+}
+
 // Compact step count: 987, 4.2k, 10.5k, 105k (truncated, never rounded up).
 static void format_steps(char *buf, size_t len, int steps) {
   if (steps < 1000) {
@@ -345,7 +421,7 @@ void weather_layer_update_callback(Layer *me, GContext* ctx) {
         graphics_fill_rect(ctx, GRect(cx + 3, cy_steps - 6, 8, 14), 4, GCornersAll); 
     } 
     else if (active_display_metric == MODE_HEART) { 
-        snprintf(metric_text, sizeof(metric_text), "%d", cached_bpm); 
+        if (cached_bpm > 0) snprintf(metric_text, sizeof(metric_text), "%d", cached_bpm); else snprintf(metric_text, sizeof(metric_text), "--"); 
         int r = 6;                // lobe radius; the point keeps its 16 px length
         int cy_heart = SY(31) - 1;   // row of the lobe centres; the heart spans cy-r .. cy+16
         int tri_h = 16;
@@ -1312,6 +1388,7 @@ static void deinit(void) {
   if (bottom_toggle != NULL) { app_timer_cancel(bottom_toggle); bottom_toggle = NULL; }
 
 #if defined(PBL_PLATFORM_EMERY)
+  health_service_events_unsubscribe();
   if (cached_bpm > 0) {
     persist_write_int(PK_CACHED_BPM, cached_bpm);
   }
@@ -1378,6 +1455,10 @@ void handle_minute_tick(struct tm *tick_time, TimeUnits units_changed)
   bool complication_changed = false;
   if ((units_changed & HOUR_UNIT) && complication_mode == MODE_ROTATE) {
     active_display_metric = (active_display_metric + 1) % 4;
+    complication_changed = true;
+  }
+
+  if (refresh_auto_metric()) {
     complication_changed = true;
   }
 
@@ -1485,16 +1566,25 @@ void in_configuration_handler(DictionaryIterator *received, void *context) {
     
 #if defined(PBL_PLATFORM_EMERY)
     Tuple *comp_mode = dict_find(received, MESSAGE_KEY_complication_mode);
+    Tuple *auto_fb = dict_find(received, MESSAGE_KEY_auto_fallback);
+    if (auto_fb != NULL) {
+      auto_fallback = (get_int(auto_fb) == MODE_STEPS) ? MODE_STEPS : MODE_WEATHER;
+      persist_write_int(PK_AUTO_FALLBACK, auto_fallback);
+    }
     if (comp_mode != NULL) {
       complication_mode = get_int(comp_mode);
       persist_write_int(PK_COMPLICATION_MODE, complication_mode);
-      
-      if (complication_mode != MODE_ROTATE) {
+    }
+    if (comp_mode != NULL || auto_fb != NULL) {
+      if (complication_mode == MODE_AUTO) {
+        refresh_auto_metric();
+      } else if (complication_mode != MODE_ROTATE) {
         active_display_metric = complication_mode;
-        if (active_display_metric != MODE_WEATHER) {
-          update_health_cache();
-        }
       }
+      if (active_display_metric != MODE_WEATHER) {
+        update_health_cache();
+      }
+      sync_health_events();
       layer_mark_dirty(weather_layer);
     }
 
@@ -1879,8 +1969,15 @@ static void init(void) {
     complication_mode = (uint8_t)persist_read_int(PK_COMPLICATION_MODE);
   }
   
+  if (persist_exists(PK_AUTO_FALLBACK)) {
+    auto_fallback = (persist_read_int(PK_AUTO_FALLBACK) == MODE_STEPS) ? MODE_STEPS : MODE_WEATHER;
+  }
+
   if (complication_mode == MODE_ROTATE) {
     active_display_metric = MODE_WEATHER;
+  } else if (complication_mode == MODE_AUTO) {
+    active_display_metric = auto_fallback;
+    refresh_auto_metric();
   } else {
     active_display_metric = complication_mode;
   }
@@ -1890,6 +1987,7 @@ static void init(void) {
   }
   
   update_health_cache(); 
+  sync_health_events();
 #endif
 
   if (DEBUGLOG == 1) { debug.general = true; }
