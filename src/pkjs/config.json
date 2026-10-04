@@ -130,6 +130,18 @@
         "messageKey": "color_accent",
         "label": "Past days accent",
         "defaultValue": "000000"
+      },
+      {
+        "type": "toggle",
+        "messageKey": "colored_icons",
+        "label": "Colored icons",
+        "defaultValue": false
+      },
+      {
+        "type": "toggle",
+        "messageKey": "status_colors",
+        "label": "Status colors",
+        "defaultValue": false
       }
     ]
   },

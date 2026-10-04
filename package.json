@@ -107,10 +107,12 @@
             "tap_to_cycle",
             "auto_fallback",
             "theme_id",
+            "status_colors",
             "color_time",
             "color_date",
             "color_today",
-            "color_accent"
+            "color_accent",
+            "colored_icons"
         ],
         "projectType": "native",
         "resources": {

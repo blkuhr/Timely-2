@@ -25,6 +25,7 @@ static bool bluetooth_connected = false;
 static bool bluetooth_state_seen = false;
 static bool vibe_suppression = true;
 static bool tap_to_cycle = false;
+static int phone_battery_pct = -1;
 
 // Colors currently in use. Resolved from settings.inverted and theme_cfg by
 // theme_resolve(); every drawing routine reads from here.
@@ -37,6 +38,8 @@ typedef struct Theme {
   GColor grid;      // calendar grid lines
   GColor today;     // today's box and today's weekday header
   GColor today_text;
+  GColor steps;     // footprints icon
+  GColor sleep;     // moon icon
   bool light;       // light background (Light mode)
 } Theme;
 static Theme theme;
@@ -289,6 +292,15 @@ static GColor resolve_color(uint8_t argb, GColor fg) {
   return (gcolor_equal(c, GColorBlack) || gcolor_equal(c, GColorWhite)) ? fg : c;
 }
 
+// True when every color is text-colored and nothing is switched on: the original
+// untinted look, which leaves the bitmap icons exactly as shipped.
+static bool plain_look(void) {
+  return !color_cfg.colored_icons && !theme_cfg.status_colors &&
+    gcolor_equal(resolve_color(color_cfg.time_color, GColorClear), GColorClear) &&
+    gcolor_equal(resolve_color(color_cfg.date_color, GColorClear), GColorClear) &&
+    gcolor_equal(resolve_color(color_cfg.today_color, GColorClear), GColorClear) &&
+    gcolor_equal(resolve_color(color_cfg.accent_color, GColorClear), GColorClear);
+}
 #endif
 
 static void theme_resolve(void) {
@@ -296,17 +308,70 @@ static void theme_resolve(void) {
   GColor bg = light ? GColorWhite : GColorBlack;
   GColor fg = light ? GColorBlack : GColorWhite;
   theme = (Theme) { .bg = bg, .fg = fg, .time = fg, .secondary = fg, .muted = fg, .grid = fg, .today = fg, .today_text = bg,
-                    .light = light };
+                    .steps = fg, .sleep = fg, .light = light };
 
 #if defined(PBL_COLOR)
   theme.time = resolve_color(color_cfg.time_color, fg);
   theme.secondary = resolve_color(color_cfg.date_color, fg);
   theme.today = resolve_color(color_cfg.today_color, fg);
   theme.muted = theme.grid = resolve_color(color_cfg.accent_color, fg);
+  if (color_cfg.colored_icons) {
+    theme.steps = light ? GColorIslamicGreen : GColorScreaminGreen;
+    theme.sleep = light ? GColorIndigo : GColorBabyBlueEyes;
+  }
   if (!gcolor_equal(theme.today, theme.fg)) {
     theme.today_text = gcolor_legible_over(theme.today);
   }
 #endif
+}
+
+static bool status_colors_on(void) {
+  return PBL_IF_COLOR_ELSE(theme_cfg.status_colors != 0, false);
+}
+
+// Semantic icon colors for the Emery complication, weather and the Bluetooth icon.
+// Bright shades on black, deep shades on white.
+static bool semantic_colors_on(void) {
+  return PBL_IF_COLOR_ELSE(color_cfg.colored_icons != 0, false);
+}
+
+static GColor sun_color(void)   { return theme.light ? GColorOrange : GColorYellow; }
+#if defined(PBL_PLATFORM_EMERY)
+static GColor heart_color(void) { return theme.light ? GColorDarkCandyAppleRed : GColorRed; }
+#endif
+static GColor bt_on_color(void) { return theme.light ? GColorCobaltBlue : GColorPictonBlue; }
+
+// Color for a Climacons condition character (see CLIMACON in pkjs/index.js).
+static GColor weather_glyph_color(char c) {
+  bool l = theme.light;
+  switch (c) {
+    case 'I': case '"': case 'J': case 'K': return sun_color();                 // sun, partly cloudy day, sunrise/set
+    case '!': case '#': case '<': case '=': case '>': case '?': case '@': case 'A':
+    case 'B': case 'C': case 'D': case 'E': case 'h':                           // cloud, fog, haze, wind
+      return l ? GColorDarkGray : GColorLightGray;
+    case '$': case '%': case '&': case '\'': case '(': case ')': case '*': case '+':
+    case ',': case '-': case '.': case '/': case 'f':                           // rain, showers, drizzle
+      return l ? GColorCobaltBlue : GColorPictonBlue;
+    case '0': case '1': case '2': case '3': case '4': case '5':
+    case '6': case '7': case '8': case '9': case ':': case ';': case 'W':       // sleet, hail, snow
+      return l ? GColorBlueMoon : GColorCeleste;
+    case 'F': case 'G': case 'H': return GColorOrange;                          // thunder
+    case 'N': return l ? GColorWindsorTan : GColorPastelYellow;                 // moon
+    default: return theme.fg;
+  }
+}
+
+// Green above 40%, yellow 20-40%, red below 20%. Darker green/yellow on light backgrounds.
+static GColor battery_status_color(int pct) {
+  bool light_bg = gcolor_equal(gcolor_legible_over(theme.bg), GColorBlack);
+  if (pct > 40) { return light_bg ? GColorIslamicGreen : GColorGreen; }
+  if (pct >= 20) { return light_bg ? GColorChromeYellow : GColorYellow; }
+  return GColorRed;
+}
+
+static void update_phone_battery_color(void) {
+  bool colored = status_colors_on() && phone_battery_pct >= 0;
+  text_layer_set_text_color(text_phone_battery_layer, colored ? battery_status_color(phone_battery_pct) : theme.fg);
 }
 
 // Push the resolved theme to the window and the text layers.
@@ -318,7 +383,7 @@ static void theme_apply(void) {
   text_layer_set_text_color(day_layer, theme.fg);
   text_layer_set_text_color(ampm_layer, theme.fg);
   text_layer_set_text_color(text_connection_layer, theme.fg);
-  text_layer_set_text_color(text_phone_battery_layer, theme.fg);
+  update_phone_battery_color();
   layer_mark_dirty(window_get_root_layer(window));
 }
 
@@ -499,7 +564,9 @@ void weather_layer_update_callback(Layer *me, GContext* ctx) {
     }
     snprintf(cond_current, sizeof(cond_current), "%s", weather.condition);
 
+    if (semantic_colors_on()) { graphics_context_set_text_color(ctx, weather_glyph_color(cond_current[0])); }
     graphics_draw_text(ctx, cond_current, climacons, GRect(2, SY(16) + WEATHER_ICON_NUDGE, SY(34) + WEATHER_ICON_GROW, SY(34) + WEATHER_ICON_GROW), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+    graphics_context_set_text_color(ctx, theme.fg);
     graphics_draw_text(ctx, temp_current, fonts_get_system_font(device_height > 168 ? FONT_KEY_GOTHIC_28 : FONT_KEY_GOTHIC_24), GRect(2, SY(42) + WEATHER_TEMP_NUDGE, SY(36), SY(36)), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
   
 #if defined(PBL_PLATFORM_EMERY)
@@ -511,6 +578,10 @@ void weather_layer_update_callback(Layer *me, GContext* ctx) {
     
     // Set the drawing color to automatically match your Light/Dark theme
     GColor icon_color = theme.fg;
+    if (semantic_colors_on()) {
+      if (active_display_metric == MODE_STEPS) { icon_color = theme.steps; }
+      else if (active_display_metric == MODE_HEART) { icon_color = heart_color(); }
+    }
     graphics_context_set_fill_color(ctx, icon_color);
     graphics_context_set_stroke_color(ctx, icon_color);
 
@@ -550,9 +621,11 @@ void weather_layer_update_callback(Layer *me, GContext* ctx) {
         snprintf(metric_text, sizeof(metric_text), "%dh%02d", cached_sleep_hours, cached_sleep_mins); 
         
         // Draw Moon using the weather font, pushed down to SY(20) to match
+        if (semantic_colors_on()) { graphics_context_set_text_color(ctx, theme.sleep); }
         graphics_draw_text(ctx, "N", climacons, GRect(cx - SY(25), SY(20), SY(50), SY(34)), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
     }
 
+    graphics_context_set_text_color(ctx, theme.fg);
     // Draw the number metric aligned with the weather temperature height, stepping
     // down to a smaller font if it would run into the clock digits
     int max_w = metric_max_width(cx);
@@ -1041,6 +1114,10 @@ void battery_layer_update_callback(Layer *me, GContext* ctx) {
   uint8_t battery_meter = battery_percent * (s_batt_width - 4) / 100;
   GColor fill_color = theme.fg;
   GColor empty_color = theme.bg;
+  bool status = status_colors_on();
+  if (status) {
+    fill_color = battery_status_color(battery_percent);
+  }
 
   graphics_context_set_fill_color(ctx, fill_color);
   graphics_fill_rect(ctx, GRect(stat_batt_left + 2, s_batt_top + 2, battery_meter, s_batt_height - 4), 0, GCornerNone);
@@ -1052,7 +1129,8 @@ void battery_layer_update_callback(Layer *me, GContext* ctx) {
   int text_y_offset = (device_height > 168) ? 3 : 2;
   GRect tb = GRect(stat_batt_left, s_batt_top - text_y_offset, s_batt_width, s_batt_height + 4);
 
-  GColor text_color = (battery_percent >= 50) ? empty_color : fill_color;
+  // Below 50% the digits sit mostly over the empty part of the gauge.
+  GColor text_color = (battery_percent >= 50) ? (status ? gcolor_legible_over(fill_color) : empty_color) : theme.fg;
   GColor outline_color = (battery_percent >= 50) ? fill_color : empty_color;
 
   graphics_context_set_text_color(ctx, outline_color);
@@ -1210,15 +1288,18 @@ void toggle_phone_battery_display() {
   }
 }
 
+static void set_connection_icon(void) {
+  bitmap_layer_set_bitmap(bmp_connection_layer, bluetooth_connected ? image_connection_icon : image_noconnection_icon);
+}
+
 void update_connection() {
   text_layer_set_text(text_connection_layer, bluetooth_connected ? lang_gen.statuses[0] : lang_gen.statuses[1]) ;
   if (bluetooth_connected) {
     generate_vibe(settings.vibe_pat_connect);
-    bitmap_layer_set_bitmap(bmp_connection_layer, image_connection_icon);
   } else {
     generate_vibe(settings.vibe_pat_disconnect);
-    bitmap_layer_set_bitmap(bmp_connection_layer, image_noconnection_icon);
   }
+  set_connection_icon();
 }
 
 static void handle_bluetooth(bool connected) {
@@ -1290,6 +1371,68 @@ bool hourvibe_period_check() {
   return vibe_period_active;
 }
 
+#if defined(PBL_COLOR)
+// The icons are white glyphs on black tiles. Recolor them so the glyph takes
+// glyph_color and the tile takes the background, blending in between.
+static GColor tint_color(GColor src, GColor glyph_color, GColor tile_color) {
+  int t = src.r + src.g + src.b;
+  GColor out = src;
+  out.r = (tile_color.r * (9 - t) + glyph_color.r * t + 4) / 9;
+  out.g = (tile_color.g * (9 - t) + glyph_color.g * t + 4) / 9;
+  out.b = (tile_color.b * (9 - t) + glyph_color.b * t + 4) / 9;
+  return out;
+}
+
+static void tint_icon(GBitmap *bitmap, GColor glyph_color, GColor tile_color) {
+  GBitmapFormat format = gbitmap_get_format(bitmap);
+  GColor *palette = gbitmap_get_palette(bitmap);
+  if (palette) {
+    int colors = (format == GBitmapFormat1BitPalette) ? 2 : (format == GBitmapFormat2BitPalette) ? 4 : 16;
+    for (int i = 0; i < colors; i++) {
+      palette[i] = tint_color(palette[i], glyph_color, tile_color);
+    }
+  } else if (format == GBitmapFormat8Bit) {
+    GRect bounds = gbitmap_get_bounds(bitmap);
+    uint8_t *data = gbitmap_get_data(bitmap);
+    int stride = gbitmap_get_bytes_per_row(bitmap);
+    for (int y = 0; y < bounds.size.h; y++) {
+      for (int x = 0; x < bounds.size.w; x++) {
+        GColor *pixel = (GColor *)&data[y * stride + x];
+        *pixel = tint_color(*pixel, glyph_color, tile_color);
+      }
+    }
+  }
+}
+#endif
+
+static GBitmap *load_icon(uint32_t resource_id, GColor glyph_color) {
+  GBitmap *bitmap = gbitmap_create_with_resource(resource_id);
+#if defined(PBL_COLOR)
+  // The plain black and white look keeps the original icons untouched.
+  if (bitmap && !plain_look()) {
+    tint_icon(bitmap, glyph_color, theme.bg);
+  }
+#endif
+  return bitmap;
+}
+
+// (Re)create the status icons in the current theme's colors. The bitmaps are
+// recolored in place, so they are reloaded from the resources on every theme change.
+static void load_icons(void) {
+  GColor bt_off_color = status_colors_on() ? GColorRed : theme.fg;
+  GColor bt_on = status_colors_on() ? bt_on_color() : theme.fg;
+  gbitmap_destroy(image_connection_icon);
+  gbitmap_destroy(image_noconnection_icon);
+  gbitmap_destroy(image_charging_icon);
+  gbitmap_destroy(image_hourvibe_icon);
+  gbitmap_destroy(image_dnd_icon);
+  image_connection_icon = load_icon(RESOURCE_ID_IMAGE_BT_LINKED_ICON, bt_on);
+  image_noconnection_icon = load_icon(RESOURCE_ID_IMAGE_BT_UNLINK_ICON, bt_off_color);
+  image_charging_icon = load_icon(RESOURCE_ID_IMAGE_CHARGING_ICON, theme.fg);
+  image_hourvibe_icon = load_icon(RESOURCE_ID_IMAGE_HOURVIBE_ICON, theme.fg);
+  image_dnd_icon = load_icon(RESOURCE_ID_IMAGE_DONOTDISTURB_ICON, theme.fg);
+}
+
 void set_layer_attr(TextLayer *textlayer, GTextAlignment Alignment) {
   text_layer_set_text_alignment(textlayer, Alignment);
   text_layer_set_text_color(textlayer, theme.fg);
@@ -1346,15 +1489,10 @@ static void window_load(Window *window) {
 
   bmp_connection_layer = bitmap_layer_create( GRect((device_width / 2) - STAT_ICON_SIZE / 2, STAT_BT_ICON_TOP, STAT_ICON_SIZE, STAT_ICON_SIZE) );
   layer_add_child(statusbar, bitmap_layer_get_layer(bmp_connection_layer));
-  
-  image_connection_icon = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_BT_LINKED_ICON);
-  image_noconnection_icon = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_BT_UNLINK_ICON);
 
   bmp_charging_layer = bitmap_layer_create( GRect(SX(STAT_CHRG_ICON_LEFT), STAT_CHRG_ICON_TOP, STAT_ICON_SIZE, STAT_ICON_SIZE) );
   layer_add_child(statusbar, bitmap_layer_get_layer(bmp_charging_layer));
-  image_charging_icon = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_CHARGING_ICON);
-  image_hourvibe_icon = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_HOURVIBE_ICON);
-  image_dnd_icon = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_DONOTDISTURB_ICON);
+  load_icons();
 
   dnd_period_check();
   hourvibe_period_check();
@@ -1441,7 +1579,8 @@ static void window_load(Window *window) {
   
   if (persist_exists(PK_PHONE_BATT)) {
     static char pb_text[10];
-    snprintf(pb_text, sizeof(pb_text), "P: %d%%", (int)persist_read_int(PK_PHONE_BATT));
+    phone_battery_pct = (int)persist_read_int(PK_PHONE_BATT);
+    snprintf(pb_text, sizeof(pb_text), "P: %d%%", phone_battery_pct);
     text_layer_set_text(text_phone_battery_layer, pb_text);
   } else {
     text_layer_set_text(text_phone_battery_layer, "P: --%");
@@ -1739,6 +1878,18 @@ void in_configuration_handler(DictionaryIterator *received, void *context) {
     }
 
 #if defined(PBL_COLOR)
+    Tuple *status_colors = dict_find(received, MESSAGE_KEY_status_colors);
+    if (status_colors != NULL) {
+      theme_cfg.status_colors = (get_int(status_colors) != 0);
+      theme_changed = true;
+    }
+
+    Tuple *colored_icons = dict_find(received, MESSAGE_KEY_colored_icons);
+    if (colored_icons != NULL) {
+      color_cfg.colored_icons = (get_int(colored_icons) != 0);
+      theme_changed = true;
+    }
+
     Tuple *color_time = dict_find(received, MESSAGE_KEY_color_time);
     if (color_time != NULL) {
       color_cfg.time_color = GColorFromHEX(get_int(color_time)).argb;
@@ -1975,6 +2126,9 @@ void in_configuration_handler(DictionaryIterator *received, void *context) {
 
     if (theme_changed) {
       theme_resolve();
+      load_icons();
+      set_connection_icon();
+      set_status_charging_icon();
       theme_apply();
     }
 
@@ -2004,6 +2158,8 @@ void my_in_rcv_handler(DictionaryIterator *received, void *context) {
     static char pb_text[10];
     snprintf(pb_text, sizeof(pb_text), "P: %d%%", pb_val);
     text_layer_set_text(text_phone_battery_layer, pb_text);
+    phone_battery_pct = pb_val;
+    update_phone_battery_color();
   }
   
   Tuple *message_type = dict_find(received, MESSAGE_KEY_message_type);
