@@ -10,6 +10,7 @@ if (!watchInfo || watchInfo.platform !== 'emery') {
     if (section.items) {
       section.items = section.items.filter(function (item) {
         return item.messageKey !== 'complication_mode' &&
+               item.messageKey !== 'auto_fallback' &&
                item.messageKey !== 'tap_to_cycle';
       });
     }
@@ -1410,7 +1411,7 @@ Pebble.addEventListener(
           payload.complication_mode >=
             0 &&
           payload.complication_mode <=
-            4 &&
+            5 &&
           Math.floor(
             payload.complication_mode
           ) ===

@@ -104,7 +104,8 @@
             "idle_stop",
             "weather_update",
             "complication_mode",
-            "tap_to_cycle"
+            "tap_to_cycle",
+            "auto_fallback"
         ],
         "projectType": "native",
         "resources": {
