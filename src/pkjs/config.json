@@ -122,7 +122,7 @@
         "type": "select",
         "messageKey": "auto_fallback",
         "label": "Auto Fallback",
-        "description": "Auto shows sleep for an hour after waking and heart rate while walking, running or working out. Otherwise it shows this.",
+        "description": "Auto shows sleep for an hour after waking and heart rate (steps on watches without a heart rate sensor) while walking, running or working out. Otherwise it shows this.",
         "defaultValue": "1",
         "options": [
           { "label": "Weather", "value": "1" },

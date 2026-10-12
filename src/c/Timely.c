@@ -59,11 +59,18 @@ static int s_batt_width = 44;
 #define PK_WEATHER_TIMESTAMP 13
 #define PK_AUTO_FALLBACK 14
 
+// The health complication (steps, sleep, heart rate, Rotate, Auto) needs the
+// health service. Heart rate also needs a heart-rate monitor, which only some
+// of those watches have (see hrm_present()).
+#if defined(PBL_HEALTH)
+#define HAS_COMPLICATION 1
+#endif
+
 #define MSG_VAL_TIMEZONE_OFFSET 103
 #define MSG_VAL_SEND_WATCH_VERSION 104
 #define MSG_VAL_REQUEST_WEATHER 106
 
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(HAS_COMPLICATION)
 enum ComplicationMode {
   MODE_STEPS = 0,
   MODE_WEATHER = 1,
@@ -102,11 +109,13 @@ static uint8_t active_display_metric = MODE_WEATHER;
 #define WEATHER_ICON_NUDGE -3
 #define WEATHER_ICON_GROW 4
 #define WEATHER_TEMP_NUDGE 6
+#define MOON_NUDGE 0
 #else
 #define CLIMACONS_RESOURCE RESOURCE_ID_FONT_CLIMACONS_32
 #define WEATHER_ICON_NUDGE 0
 #define WEATHER_ICON_GROW 0
 #define WEATHER_TEMP_NUDGE 0
+#define MOON_NUDGE -5
 #endif
 #define STAT_ICON_SIZE 20
 #define REL_CLOCK_DATE_LEFT 2
@@ -118,6 +127,8 @@ static uint8_t active_display_metric = MODE_WEATHER;
 #define REL_CLOCK_SUBTEXT_TOP 56
 #define SY(n) ((n) * device_height / 168)
 #define SX(n) ((n) * device_width / 144)
+// The hand-drawn complication icons are sized for Emery; shrink them for the 144 px watches.
+#define ICON(n) (device_width > 144 ? (n) : ((n) * 9 + 5) / 10)
 
 weather_data weather = { .current = 999, .condition = {'h'}, .requests = 0, .failures = 0 };
 static time_t weather_timestamp = 0;
@@ -224,10 +235,42 @@ void setInvColors(GContext* ctx) {
   graphics_context_set_text_color(ctx, settings.inverted ? GColorWhite : GColorBlack);
 }
 
-// Refresh only the health metric currently visible on Emery.
+#if defined(HAS_COMPLICATION)
+// Heart rate needs a heart-rate monitor: Pebble Time 2 and Pebble 2 HR have one;
+// Pebble Time, Pebble 2 SE and Pebble 2 Duo do not. The SDK has no compile-time
+// flag for it and the health service reports heart rate as available even on
+// the Time emulator, so go by platform, then rule out the Pebble 2 SE (also a
+// diorite) by model and by the watch saying the metric is unsupported.
+static bool hrm_present(void) {
+#if defined(PBL_PLATFORM_EMERY)
+  return true;
+#elif defined(PBL_PLATFORM_DIORITE)
+  static int8_t present = -1;
+  if (present < 0) {
+    time_t now = time(NULL);
+    HealthServiceAccessibilityMask access =
+      health_service_metric_aggregate_averaged_accessible(
+        HealthMetricHeartRateBPM, now, now,
+        HealthAggregationAvg, HealthServiceTimeScopeOnce);
+    present = (watch_info_get_model() == WATCH_INFO_MODEL_PEBBLE_2_SE ||
+               (access & HealthServiceAccessibilityMaskNotSupported)) ? 0 : 1;
+  }
+  return present == 1;
+#else
+  return false;
+#endif
+}
+
+// A stored or received mode that needs a heart-rate monitor falls back to steps.
+static uint8_t usable_mode(uint8_t mode) {
+  return (mode == MODE_HEART && !hrm_present()) ? MODE_STEPS : mode;
+}
+#endif
+
+// Refresh only the health metric currently visible in the complication.
 // Returns true when the cached value changed and the complication needs redraw.
 static bool update_health_cache(void) {
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(HAS_COMPLICATION)
   time_t now = time(NULL);
   time_t start_today = time_start_of_today();
 
@@ -241,7 +284,7 @@ static bool update_health_cache(void) {
         return true;
       }
     }
-  } else if (active_display_metric == MODE_HEART) {
+  } else if (active_display_metric == MODE_HEART && hrm_present()) {
     HealthServiceAccessibilityMask access =
       health_service_metric_aggregate_averaged_accessible(
         HealthMetricHeartRateBPM, now, now,
@@ -271,7 +314,7 @@ static bool update_health_cache(void) {
   return false;
 }
 
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(HAS_COMPLICATION)
 // Auto mode: look back this far for a finished sleep session, and keep showing
 // the sleep summary for this long after waking.
 #define AUTO_SLEEP_LOOKBACK_SEC (16 * 60 * 60)
@@ -294,8 +337,9 @@ static void scan_last_sleep_end(void) {
 }
 
 // Pick what MODE_AUTO shows right now: sleep summary while asleep and for an
-// hour after waking, heart rate while walking/running/in a workout, otherwise
-// the configured fallback. Falls back too when health data is unavailable.
+// hour after waking, heart rate (steps without a heart-rate monitor) while
+// walking/running/in a workout, otherwise the configured fallback. Falls back
+// too when health data is unavailable.
 static uint8_t auto_pick_metric(void) {
   time_t now = time(NULL);
   HealthServiceAccessibilityMask access =
@@ -314,7 +358,7 @@ static uint8_t auto_pick_metric(void) {
   }
 
   if (activities & (HealthActivityWalk | HealthActivityRun | HealthActivityOpenWorkout)) {
-    return MODE_HEART;
+    return hrm_present() ? MODE_HEART : MODE_STEPS;
   }
   return auto_fallback;
 }
@@ -369,20 +413,40 @@ static void format_steps(char *buf, size_t len, int steps) {
   }
 }
 
-// Width available to the metric text, which is centred on cx, before it would
-// run into the clock digits (whose left edge shifts with 1- vs 2-digit hours).
-static int metric_max_width(int cx) {
+// Left edge of the clock digits, which shifts with 1- vs 2-digit hours.
+static int clock_left_edge(void) {
   const char *time_str = text_layer_get_text(time_layer);
   GRect tf = layer_get_frame(text_layer_get_layer(time_layer));
+#if defined(PBL_PLATFORM_EMERY)
   GFont time_font = s_time_font ? s_time_font : fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD);
+#else
+  GFont time_font = fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD);
+#endif
   int clock_left = device_width;
   if (time_str) {
     GSize ts = graphics_text_layout_get_content_size(time_str, time_font,
         GRect(0, 0, 2 * device_width, tf.size.h), GTextOverflowModeWordWrap, GTextAlignmentLeft);
     clock_left = tf.origin.x + tf.size.w - ts.w;
   }
+  return clock_left;
+}
+
+// Width available to the metric text, which is centred on cx, before it would
+// run into the clock digits. The 144 px watches have little room left of the
+// clock, so there the text may also slide left of centre (see metric_center()).
+static int metric_max_width(int cx, int clock_left) {
+  if (device_width <= 144) {
+    return (clock_left - 2) < 2 * cx ? (clock_left - 2) : 2 * cx;
+  }
   int right_room = clock_left - 2 - cx;
   return 2 * (right_room < cx ? right_room : cx);
+}
+
+static int metric_center(int cx, int clock_left, int text_w) {
+  if (device_width <= 144 && cx + text_w / 2 > clock_left - 2) {
+    return clock_left - 2 - text_w / 2;
+  }
+  return cx;
 }
 #endif
 
@@ -390,7 +454,7 @@ void weather_layer_update_callback(Layer *me, GContext* ctx) {
   (void)me; 
   setColors(ctx);
 
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(HAS_COMPLICATION)
   if (active_display_metric == MODE_WEATHER) {
 #endif
     static char temp_current[10] = "N/A  ";
@@ -405,7 +469,7 @@ void weather_layer_update_callback(Layer *me, GContext* ctx) {
     graphics_draw_text(ctx, cond_current, climacons, GRect(2, SY(16) + WEATHER_ICON_NUDGE, SY(34) + WEATHER_ICON_GROW, SY(34) + WEATHER_ICON_GROW), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
     graphics_draw_text(ctx, temp_current, fonts_get_system_font(device_height > 168 ? FONT_KEY_GOTHIC_28 : FONT_KEY_GOTHIC_24), GRect(2, SY(42) + WEATHER_TEMP_NUDGE, SY(36), SY(36)), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
   
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(HAS_COMPLICATION)
   } else {
     static char metric_text[16] = "";
     
@@ -429,9 +493,9 @@ void weather_layer_update_callback(Layer *me, GContext* ctx) {
         int cy_steps = SY(30); 
         
         // Draw Left Footprint
-        graphics_fill_rect(ctx, GRect(cx - 11, cy_steps, 8, 14), 4, GCornersAll); 
+        graphics_fill_rect(ctx, GRect(cx - ICON(11), cy_steps, ICON(8), ICON(14)), ICON(4), GCornersAll); 
         // Draw Right Footprint
-        graphics_fill_rect(ctx, GRect(cx + 3, cy_steps - 6, 8, 14), 4, GCornersAll); 
+        graphics_fill_rect(ctx, GRect(cx + ICON(3), cy_steps - ICON(6), ICON(8), ICON(14)), ICON(4), GCornersAll); 
     } 
     else if (active_display_metric == MODE_HEART) { 
         if (cached_bpm > 0) {
@@ -439,9 +503,9 @@ void weather_layer_update_callback(Layer *me, GContext* ctx) {
         } else {
           snprintf(metric_text, sizeof(metric_text), "--");
         }
-        int r = 6;                // lobe radius; the point keeps its 16 px length
-        int cy_heart = SY(31) - 1;   // row of the lobe centres; the heart spans cy-r .. cy+16
-        int tri_h = 16;
+        int r = ICON(6);          // lobe radius; the point keeps its length
+        int cy_heart = SY(31) - 1;   // row of the lobe centres; the heart spans cy-r .. cy+ICON(16)
+        int tri_h = ICON(16);
         
         // Draw Heart Lobes
         graphics_fill_circle(ctx, GPoint(cx - r, cy_heart), r); 
@@ -457,13 +521,18 @@ void weather_layer_update_callback(Layer *me, GContext* ctx) {
         snprintf(metric_text, sizeof(metric_text), "%dh%02d", cached_sleep_hours, cached_sleep_mins); 
         
         // Draw Moon using the weather font, pushed down to SY(20) to match
-        graphics_draw_text(ctx, "N", climacons, GRect(cx - SY(25), SY(20), SY(50), SY(34)), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+        graphics_draw_text(ctx, "N", climacons, GRect(cx - SY(25), SY(20) + MOON_NUDGE, SY(50), SY(34)), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
     }
 
     // Draw the number metric aligned with the weather temperature height, stepping
     // down to a smaller font if it would run into the clock digits
-    int max_w = metric_max_width(cx);
-    const char *font_keys[] = { FONT_KEY_GOTHIC_28, FONT_KEY_GOTHIC_24, FONT_KEY_GOTHIC_18 };
+    int clock_left = clock_left_edge();
+    int max_w = metric_max_width(cx, clock_left);
+    // Start at the weather temperature's font: Gothic 28 on Emery, Gothic 24 elsewhere.
+    const bool big = device_height > 168;
+    const char *font_keys[] = { big ? FONT_KEY_GOTHIC_28 : FONT_KEY_GOTHIC_24,
+                                big ? FONT_KEY_GOTHIC_24 : FONT_KEY_GOTHIC_18,
+                                big ? FONT_KEY_GOTHIC_18 : FONT_KEY_GOTHIC_14 };
     const int font_nudge[] = { 0, 3, 6 };
     int fi = 0;
     GSize metric_size = GSize(0, 0);
@@ -475,7 +544,8 @@ void weather_layer_update_callback(Layer *me, GContext* ctx) {
     }
     if (fi == 3) fi = 2;
     int box_w = metric_size.w + 6;
-    graphics_draw_text(ctx, metric_text, metric_font, GRect(cx - box_w / 2, SY(42) + WEATHER_TEMP_NUDGE + font_nudge[fi], box_w, SY(36)), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+    int mx = metric_center(cx, clock_left, metric_size.w);
+    graphics_draw_text(ctx, metric_text, metric_font, GRect(mx - box_w / 2, SY(42) + WEATHER_TEMP_NUDGE + font_nudge[fi], box_w, SY(36)), GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
   }
 #endif
 }
@@ -1404,9 +1474,9 @@ static void deinit(void) {
   if (timezone_request != NULL) { app_timer_cancel(timezone_request); timezone_request = NULL; }
   if (bottom_toggle != NULL) { app_timer_cancel(bottom_toggle); bottom_toggle = NULL; }
 
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(HAS_COMPLICATION)
   health_service_events_unsubscribe();
-  if (cached_bpm > 0) {
+  if (cached_bpm > 0 && hrm_present()) {
     persist_write_int(PK_CACHED_BPM, cached_bpm);
   }
 #endif
@@ -1466,12 +1536,15 @@ void handle_minute_tick(struct tm *tick_time, TimeUnits units_changed)
     }
   } 
 
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(HAS_COMPLICATION)
   // Rotate first at the top of the hour so the newly selected metric is
   // refreshed immediately instead of briefly showing an hour-old cache.
   bool complication_changed = false;
   if ((units_changed & HOUR_UNIT) && complication_mode == MODE_ROTATE) {
     active_display_metric = (active_display_metric + 1) % 4;
+    if (active_display_metric == MODE_HEART && !hrm_present()) {
+      active_display_metric = MODE_SLEEP;
+    }
     complication_changed = true;
   }
 
@@ -1581,7 +1654,7 @@ void in_timezone_handler(DictionaryIterator *received, void *context) {
 
 void in_configuration_handler(DictionaryIterator *received, void *context) {
     
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(HAS_COMPLICATION)
     Tuple *comp_mode = dict_find(received, MESSAGE_KEY_complication_mode);
     Tuple *auto_fb = dict_find(received, MESSAGE_KEY_auto_fallback);
     if (auto_fb != NULL) {
@@ -1589,7 +1662,7 @@ void in_configuration_handler(DictionaryIterator *received, void *context) {
       persist_write_int(PK_AUTO_FALLBACK, auto_fallback);
     }
     if (comp_mode != NULL) {
-      complication_mode = get_int(comp_mode);
+      complication_mode = usable_mode(get_int(comp_mode));
       persist_write_int(PK_COMPLICATION_MODE, complication_mode);
     }
     if (comp_mode != NULL || auto_fb != NULL) {
@@ -1980,10 +2053,10 @@ static void init(void) {
     }
   }
   
-#if defined(PBL_PLATFORM_EMERY)
+#if defined(HAS_COMPLICATION)
   complication_mode = MODE_WEATHER;
   if (persist_exists(PK_COMPLICATION_MODE)) {
-    complication_mode = (uint8_t)persist_read_int(PK_COMPLICATION_MODE);
+    complication_mode = usable_mode((uint8_t)persist_read_int(PK_COMPLICATION_MODE));
   }
   
   // Only an int holding MODE_STEPS selects steps; anything else (including

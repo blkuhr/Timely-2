@@ -1,21 +1,41 @@
 var Clay = require('@rebble/clay');
 var clayConfig = require('./config.json');
 
-// Filter manually because this Clay version predates Emery's capability names.
+// Filter manually because this Clay version predates the newer platforms' capability names.
+// The complication needs the health service (everything but aplite); heart rate also
+// needs a heart-rate monitor (Pebble Time 2 and Pebble 2 HR, not the Pebble 2 SE or Duo);
+// touch-to-cycle is Pebble Time 2 only.
 var watchInfo = null;
 try { watchInfo = Pebble.getActiveWatchInfo(); } catch (ignore) {}
 
-if (!watchInfo || watchInfo.platform !== 'emery') {
-  clayConfig.forEach(function (section) {
-    if (section.items) {
-      section.items = section.items.filter(function (item) {
-        return item.messageKey !== 'complication_mode' &&
-               item.messageKey !== 'auto_fallback' &&
-               item.messageKey !== 'tap_to_cycle';
-      });
+var platform = watchInfo ? watchInfo.platform : null;
+var hasHealth = platform === 'basalt' || platform === 'diorite' ||
+                platform === 'flint' || platform === 'emery';
+var hasHrm = platform === 'emery' ||
+             (platform === 'diorite' && !/_se_/.test(String(watchInfo.model || '')));
+
+clayConfig.forEach(function (section) {
+  if (!section.items) { return; }
+  section.items = section.items.filter(function (item) {
+    if (item.messageKey === 'complication_mode' ||
+        item.messageKey === 'auto_fallback') {
+      return hasHealth;
     }
+    if (item.messageKey === 'tap_to_cycle') {
+      return platform === 'emery';
+    }
+    return true;
   });
-}
+  if (!hasHrm) {
+    section.items.forEach(function (item) {
+      if (item.messageKey === 'complication_mode' && item.options) {
+        item.options = item.options.filter(function (option) {
+          return option.value !== '2';
+        });
+      }
+    });
+  }
+});
 
 var clay = new Clay(clayConfig, null, {autoHandleEvents: false});
 
