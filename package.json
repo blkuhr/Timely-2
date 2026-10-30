@@ -105,7 +105,14 @@
             "weather_update",
             "complication_mode",
             "tap_to_cycle",
-            "auto_fallback"
+            "auto_fallback",
+            "color_preset",
+            "status_colors",
+            "color_time",
+            "color_date",
+            "color_today",
+            "color_accent",
+            "colored_icons"
         ],
         "projectType": "native",
         "resources": {

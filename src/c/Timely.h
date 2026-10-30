@@ -81,6 +81,16 @@ typedef struct persist_adv_settings { // 243 bytes
   uint8_t slots[10];
 } __attribute__((__packed__)) persist_adv_settings;
 
+// The color settings that drive rendering. Black and white both mean "text color".
+typedef struct persist_colors { // 6 bytes
+  uint8_t time_color;             // GColor argb
+  uint8_t date_color;
+  uint8_t today_color;
+  uint8_t accent_color;           // calendar muted days and grid
+  uint8_t colored_icons;          // semantic complication / weather / Bluetooth colors
+  uint8_t status_colors;          // battery levels, Bluetooth disconnected
+} __attribute__((__packed__)) persist_colors;
+
 typedef struct weather_data {
   int16_t current;
   char condition[2];

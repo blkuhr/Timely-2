@@ -1,5 +1,7 @@
 var Clay = require('@rebble/clay');
 var clayConfig = require('./config.json');
+var customClay = require('./custom-clay');
+var palette = require('./palette');
 
 // Filter manually because this Clay version predates the newer platforms' capability names.
 // The complication needs the health service (everything but aplite); heart rate also
@@ -37,7 +39,33 @@ clayConfig.forEach(function (section) {
   }
 });
 
-var clay = new Clay(clayConfig, null, {autoHandleEvents: false});
+var clay = new Clay(clayConfig, customClay, {autoHandleEvents: false});
+
+// Each time the page opens, rebuild Clay with color pickers that only offer colors
+// readable on the saved background (Dark/Light); saved colors outside that set are
+// kept as extra swatches so they are not reset.
+var COLOR_KEYS = ['color_time', 'color_date', 'color_today', 'color_accent'];
+
+function buildClay(settings) {
+  var dark = String(settings.style_inv) === '0';
+  var saved = COLOR_KEYS.map(function (key) { return settings[key]; });
+  var config = JSON.parse(JSON.stringify(clayConfig));
+  config.forEach(function (section) {
+    (section.items || []).forEach(function (item) {
+      if (item.type === 'color' && COLOR_KEYS.indexOf(item.messageKey) !== -1) {
+        item.layout = palette.buildPalette(dark, saved);
+      }
+    });
+  });
+  // With autoHandleEvents off, each Clay instance registers a 'ready' listener
+  // that fills in its watch info (meta). 'ready' has already fired by now, so the
+  // listener added on every page open never runs (harmless), and the rebuilt
+  // instance has no meta of its own: carry over the startup instance's, or
+  // capability checks crash the page.
+  var rebuilt = new Clay(config, customClay, {autoHandleEvents: false});
+  rebuilt.meta = clay.meta;
+  return rebuilt;
+}
 
 var translations = {
     EN: { trans_connected: 'Linked', trans_disconnected: 'No Link', trans_abbr_sunday: 'Su', trans_abbr_monday: 'Mo', trans_abbr_tuesday: 'Tu', trans_abbr_wedsday: 'We', trans_abbr_thursday: 'Th', trans_abbr_friday: 'Fr', trans_abbr_saturday: 'Sa', trans_january: 'January', trans_february: 'February', trans_march: 'March', trans_april: 'April', trans_may: 'May', trans_june: 'June', trans_july: 'July', trans_august: 'August', trans_september: 'September', trans_october: 'October', trans_november: 'November', trans_december: 'December', trans_sunday: 'Sunday', trans_monday: 'Monday', trans_tuesday: 'Tuesday', trans_wedsday: 'Wednesday', trans_thursday: 'Thursday', trans_friday: 'Friday', trans_saturday: 'Saturday' },
@@ -254,6 +282,15 @@ function normalizeSettings(raw) {
         value === true ||
         value === 1 ||
         value === '1';
+    } else if (item.type === 'color') {
+      // Colors are RGB integers; the config defaults are hex strings.
+      if (typeof value === 'string') {
+        value = parseInt(value.replace(/^(#|0x)/i, ''), 16);
+      }
+
+      if (!finiteNumber(value)) {
+        value = parseInt(item.defaultValue, 16);
+      }
     } else if (item.options) {
       var valid = item.options.some(function (option) {
         return String(option.value) === String(value);
@@ -1282,10 +1319,14 @@ Pebble.addEventListener(
 
   function () {
     // Normalize obsolete saved values before Clay renders its select controls.
-    saveJSON(
-      'clay-settings',
-      readSettings()
-    );
+    var current = readSettings();
+    saveJSON('clay-settings', current);
+
+    try {
+      clay = buildClay(current);
+    } catch (error) {
+      console.warn('Palette error: ' + error);
+    }
 
     Pebble.openURL(
       clay.generateUrl()
